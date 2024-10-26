@@ -1,2 +1,6 @@
 streamlit
+PyPDF2
 pandas
+pytz
+requests
+
