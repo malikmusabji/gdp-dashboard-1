@@ -1,151 +1,233 @@
 import streamlit as st
+import sqlite3
 import pandas as pd
-import math
-from pathlib import Path
+from PyPDF2 import PdfReader
+import io
+import requests
+from datetime import datetime
+import pytz
+import base64
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Function to get user's timezone based on IP address
+def get_user_timezone():
+    try:
+        response = requests.get("https://ipinfo.io/json")
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("timezone", "UTC")
+    except:
+        pass
+    return "UTC"
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Function to display flip clock based on the user's time zone
+def display_flip_clock():
+    user_timezone = get_user_timezone()
+    now = datetime.now(pytz.timezone(user_timezone))
+
+    flipclock_html = f"""
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/flipclock/0.7.8/flipclock.min.css">
+    <div id="flip-clock" style="display: flex; justify-content: center;"></div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/flipclock/0.7.8/flipclock.min.js"></script>
+    <script type="text/javascript">
+        document.addEventListener("DOMContentLoaded", function() {{
+            var clock = new FlipClock(document.getElementById('flip-clock'), {{
+                clockFace: 'TwentyFourHourClock',
+                showSeconds: true
+            }});
+        }});
+    </script>
+    """
+    
+    st.components.v1.html(flipclock_html, height=150)
+
+# Function to add JavaScript for detecting tab changes
+def detect_tab_switch():
+    js_code = """
+    <script>
+        document.addEventListener("visibilitychange", function() {
+            if (document.hidden) {
+                alert("You are moving away from this page! Please stay on this tab.");
+            }
+        });
+    </script>
+    """
+    st.components.v1.html(js_code)
+
+# Function to display a session timer that counts up from the user's login time
+def display_session_timer():
+    if "login_time" in st.session_state:
+        # Calculate the elapsed time since login in seconds
+        elapsed_time = (datetime.now(pytz.timezone(get_user_timezone())) - st.session_state.login_time).total_seconds()
+        session_timer_html = f"""
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/flipclock/0.7.8/flipclock.min.css">
+        <div id="session-timer" style="display: flex; justify-content: center;"></div>
+        
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/flipclock/0.7.8/flipclock.min.js"></script>
+        <script type="text/javascript">
+            document.addEventListener("DOMContentLoaded", function() {{
+                var timer = new FlipClock(document.getElementById('session-timer'), {{
+                    clockFace: 'MinuteCounter',
+                    autoStart: true
+                }});
+                // Set the timer to start from the elapsed time
+                timer.setTime({int(elapsed_time)});
+                timer.start();
+            }});
+        </script>
+        """
+        
+        st.components.v1.html(session_timer_html, height=150)
+
+# Database setup and login system
+def init_db():
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
+    conn.commit()
+    conn.close()
+
+def add_user_to_db(username, password):
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+        conn.commit()
+        print(f"User '{username}' added successfully.")
+    except sqlite3.IntegrityError:
+        print(f"User '{username}' already exists.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        conn.close()
+        
+def login():
+    st.title("Login Page")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+        try:
+            conn = sqlite3.connect('users.db')
+            c = conn.cursor()
+            c.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+            user = c.fetchone()
+            if user:
+                st.success(f"Welcome, {username}!")
+                st.session_state.login_time = datetime.now(pytz.timezone(get_user_timezone()))
+                st.session_state.login_status = True
+                return True
+            else:
+                st.error("Invalid username or password.")
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
+        finally:
+            conn.close()
+    return False
 
 @st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+def load_default_timetable():
+    # Sample timetable data
+    data = {
+        "Time": ["09-10 AM", "10-11 AM", "11-12 AM", "12-01 PM", "01-02 PM", "02-03 PM", "03-04 PM", "04-05 PM"],
+        "Monday": ["Lecture / G:All C:PEV112 / R: 56-703 / S:BO301"] * 8,
+        "Tuesday": ["Lecture / G:All C:PEV112 / R: 56-703 / S:BO301"] * 8,
+        "Wednesday": ["Practical / G:1 C:PEV112 / R: 56-703 / S:BO301"] * 8,
+        "Thursday": [""] * 8,
+        "Friday": [""] * 8,
+        "Saturday": [""] * 8
+    }
+    return pd.DataFrame(data)
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+def load_course_info():
+    # Sample course information
+    course_data = {
+        "CourseCode": ["BTY396", "BTY416", "BTY441", "BTY463", "BTY464", "BTY496", "BTY499", "BTY651", "ICT202B", "PEA402", "PESS01", "PEV112"],
+        "CourseType": ["CR", "CR", "EM", "CR", "CR", "CR", "CR", "PW", "CR", "OM", "PE", "OM"],
+        "CourseName": ["BIOSEPARATION ENGINEERING", "BIOSEPARATION ENGINEERING LABORATORY", "PHARMACEUTICAL ENGINEERING", 
+                       "BIOINFORMATICS AND COMPUTATIONAL BIOLOGY", "BIOINFORMATICS AND COMPUTATIONAL BIOLOGY LABORATORY", 
+                       "METABOLIC ENGINEERING", "SEMINAR ON SUMMER TRAINING", "QUALITY CONTROL AND QUALITY ASSURANCE", 
+                       "AI, ML AND EMERGING TECHNOLOGIES", "ANALYTICAL SKILLS -II", "MENTORING - VII", "VERBAL ABILITY"],
+        "Credits": [3, 1, 3, 2, 1, 2, 3, 3, 2, 4, 0, 3],
+        "Faculty": ["Dr. Ajay Kumar", "Dr. Ajay Kumar", "Dr. Shashank Garg", "Dr. Anish Kumar", 
+                    "Dr. Anish Kumar", "Dr. Shashank Garg", "", "Dr. Aarti Bains", 
+                    "Dr. Piyush Kumar Yadav", "Kamal Deep", "", "Jaskiranjit Kaur"]
+    }
+    return pd.DataFrame(course_data)
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+def display_pdf(pdf_file):
+    pdf_data = pdf_file.read()
+    base64_pdf = base64.b64encode(pdf_data).decode('utf-8')
+    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="700" height="1000" type="application/pdf"></iframe>'
+    st.markdown(pdf_display, unsafe_allow_html=True)
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+def home():
+    st.title("Academic Schedule and Course Information")
+    st.write("Welcome to the Home Page.")
+    
+    display_flip_clock()
+    display_session_timer()
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    timetable_df = load_default_timetable()
+    tab1, tab2, tab3 = st.tabs(["Weekly Schedule", "Course Information", "PDF View"])
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    with tab1:
+        st.subheader("Weekly Class Schedule")
+        st.dataframe(timetable_df)
 
-    return gdp_df
+    with tab2:
+        st.subheader("Course Information")
+        course_info_df = load_course_info()
+        st.dataframe(course_info_df)
 
-gdp_df = get_gdp_data()
+    with tab3:
+        st.subheader("Upload and View PDF")
+        uploaded_pdf = st.file_uploader("Choose a PDF file", type="pdf")
+        if uploaded_pdf is not None:
+            display_pdf(uploaded_pdf)
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+def main():
+    st.sidebar.title("Navigation")
+    page = st.sidebar.selectbox("Choose a page", ("Home", "Simulation", "Reading Material", "Questions"))
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+    # Logout button in the sidebar
+    if st.sidebar.button("Logout"):
+        st.session_state.login_status = False
+        st.session_state.pop('login_time', None)
+        st.success("You have been logged out.")
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+    # Call the function to detect tab switches
+    detect_tab_switch()
+    
+    if page == "Home":
+        home()
+    elif page == "Simulation":
+        st.title("Simulation")
+        display_flip_clock()
+        display_session_timer()
+        st.write("Implement simulations")
+    elif page == "Reading Material":
+        st.title("Reading Material")
+        display_flip_clock()
+        display_session_timer()
+        st.write("Here are some flashcards/reading material to engage students.")
+    elif page == "Questions":
+        st.title("Questions")
+        display_flip_clock()
+        display_session_timer()
+        st.write("Welcome to the Engaging Page.")
 
-# Add some spacing
-''
-''
+def app():
+    init_db()
+    if "login_status" not in st.session_state:
+        st.session_state.login_status = False
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+    if not st.session_state.login_status:
+        login()
+    if st.session_state.get("login_status"):
+        main()
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+if __name__ == "__main__":
+    app()
